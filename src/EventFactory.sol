@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import "./Market.sol";
-import "./interfaces/IPricingCurve.sol";
+import "./BinaryPredictionMarket.sol";
 // import "./resolvers/ManualResolver.sol";
 // import "./resolvers/TimeBasedResolver.sol";
 import "lib/openzeppelin-contracts/contracts/access/Ownable.sol";
@@ -16,10 +15,9 @@ contract EventFactory is Ownable, ReentrancyGuard {
     // Market configuration structure
     struct MarketConfig {
         string question;
-        uint256 endTime;
-        address pricingCurve;
-        address oracle; // Only used for time-based resolution, ignored for manual
-        uint256 creatorFeePercentage; // Fee percentage set by event creator in basis points
+        uint256 duration; // Duration in seconds instead of endTime
+        uint256 fee; // Fee percentage in basis points (100 = 1%)
+        uint256 seedCollateral; // Initial seed collateral amount
     }
     
     // Event structure
@@ -39,7 +37,7 @@ contract EventFactory is Ownable, ReentrancyGuard {
         uint256 eventId;
         uint256 endTime;
         address resolver;
-        address pricingCurve;
+        uint256 fee;
         bool exists;
     }
     
@@ -51,11 +49,7 @@ contract EventFactory is Ownable, ReentrancyGuard {
     uint256 public nextMarketId = 1;
     
     // Protocol configuration
-    uint256 public protocolFeeSharePercentage = 5000; // 50% of creator fees go to protocol (in basis points)
-    address public protocolFeeRecipient;
-    uint256 public maxCreatorFeePercentage = 5000; // Max 50% creator fee allowed
-    
-    mapping(address => bool) public approvedPricingCurves;
+    uint256 public maxFeePercentage = 1000; // Max 10% fee allowed (in basis points)
     
     // Events
     event EventCreated(
@@ -72,18 +66,14 @@ contract EventFactory is Ownable, ReentrancyGuard {
         string question
     );
     
-    event PricingCurveApproved(address indexed pricingCurve, bool approved);
-    event ProtocolFeeShareUpdated(uint256 oldShare, uint256 newShare);
-    event ProtocolFeeRecipientUpdated(address oldRecipient, address newRecipient);
-    event MaxCreatorFeeUpdated(uint256 oldMaxFee, uint256 newMaxFee);
+    event MaxFeeUpdated(uint256 oldMaxFee, uint256 newMaxFee);
     
     // Errors
     error EventNotFound();
     error MarketNotFound();
     error InvalidResolver();
-    error InvalidPricingCurve();
     error InvalidFeePercentage();
-    error CreatorFeeExceedsMaximum();
+    error FeeExceedsMaximum();
     error InvalidEndTime();
     error EmptyQuestion();
     error EmptyTitle();
@@ -91,18 +81,15 @@ contract EventFactory is Ownable, ReentrancyGuard {
     
     /**
      * @dev Constructor
-     * @param _protocolFeeRecipient Address to receive protocol fees
      */
-    constructor(address _protocolFeeRecipient) Ownable(msg.sender) {
-        require(_protocolFeeRecipient != address(0), "Invalid fee recipient");
-        protocolFeeRecipient = _protocolFeeRecipient;
+    constructor() Ownable(msg.sender) {
     }
     
     /**
      * @dev Creates a new manual resolution event with multiple markets
      * @param title The title of the event
      * @param description The description of the event
-     * @param marketConfigs Array of market configurations (oracle field ignored)
+     * @param marketConfigs Array of market configurations
      * @return eventId The ID of the created event
      * @return marketIds Array of created market IDs
      */
@@ -110,7 +97,7 @@ contract EventFactory is Ownable, ReentrancyGuard {
         string memory title,
         string memory description,
         MarketConfig[] memory marketConfigs
-    ) external nonReentrant returns (uint256 eventId, uint256[] memory marketIds) {
+    ) external payable nonReentrant returns (uint256 eventId, uint256[] memory marketIds) {
         // Validation
         if (bytes(title).length == 0) revert EmptyTitle();
         if (marketConfigs.length == 0) revert NoMarketsProvided();
@@ -128,6 +115,15 @@ contract EventFactory is Ownable, ReentrancyGuard {
         address resolver,
         bool isManual
     ) internal returns (uint256 eventId, uint256[] memory marketIds) {
+        // Calculate total seed collateral needed
+        uint256 totalSeedCollateral = 0;
+        for (uint256 i = 0; i < marketConfigs.length; i++) {
+            totalSeedCollateral += marketConfigs[i].seedCollateral;
+        }
+        
+        // Ensure sufficient ETH provided
+        require(msg.value >= totalSeedCollateral, "Insufficient ETH for seed collateral");
+        
         eventId = nextEventId++;
         marketIds = new uint256[](marketConfigs.length);
         
@@ -149,6 +145,11 @@ contract EventFactory is Ownable, ReentrancyGuard {
         // Update the event with the actual market IDs
         events[eventId].marketIds = marketIds;
         
+        // Refund excess ETH
+        if (msg.value > totalSeedCollateral) {
+            payable(msg.sender).transfer(msg.value - totalSeedCollateral);
+        }
+        
         emit EventCreated(eventId, title, msg.sender, marketIds);
     }
     
@@ -159,94 +160,51 @@ contract EventFactory is Ownable, ReentrancyGuard {
         uint256 eventId,
         MarketConfig memory config,
         address resolver,
-        bool isManual
+        bool /* isManual */
     ) internal returns (uint256 marketId) {
         // Validation
         if (bytes(config.question).length == 0) revert EmptyQuestion();
-        if (config.endTime <= block.timestamp) revert InvalidEndTime();
-        if (!approvedPricingCurves[config.pricingCurve]) revert InvalidPricingCurve();
-        if (config.creatorFeePercentage > maxCreatorFeePercentage) revert CreatorFeeExceedsMaximum();
+        if (config.duration == 0) revert InvalidEndTime();
+        if (config.fee > maxFeePercentage) revert FeeExceedsMaximum();
         
         marketId = nextMarketId++;
         
-        // Deploy the market contract
-        Market market = new Market(
-            marketId,
+        // Deploy the market contract with seed collateral
+        BinaryPredictionMarket market = new BinaryPredictionMarket{value: config.seedCollateral}(
             config.question,
-            config.endTime,
-            config.creatorFeePercentage,
-            protocolFeeSharePercentage,
-            protocolFeeRecipient,
-            events[eventId].creator,
             resolver,
-            IPricingCurve(config.pricingCurve)
+            config.fee,
+            config.duration,
+            config.seedCollateral
         );
+        
+        uint256 endTime = block.timestamp + config.duration;
         
         // Store market info
         markets[marketId] = MarketInfo({
             marketContract: address(market),
             question: config.question,
             eventId: eventId,
-            endTime: config.endTime,
+            endTime: endTime,
             resolver: resolver,
-            pricingCurve: config.pricingCurve,
+            fee: config.fee,
             exists: true
         });
-        
-        // // Auto-configure the resolver for the event creator
-        // _configureResolver(marketId, config, resolver, isManual, events[eventId].creator);
         
         emit MarketCreated(marketId, eventId, address(market), config.question);
     }
     
     /**
-     * @dev Approves or disapproves a pricing curve contract
-     * @param pricingCurve The pricing curve contract address
-     * @param approved Whether to approve or disapprove
+     * @dev Updates the maximum fee percentage
+     * @param newMaxFeePercentage New max fee percentage in basis points (max 1000 = 10%)
      */
-    function setPricingCurveApproval(address pricingCurve, bool approved) external onlyOwner {
-        approvedPricingCurves[pricingCurve] = approved;
-        emit PricingCurveApproved(pricingCurve, approved);
-    }
-    
-    
-    /**
-     * @dev Updates the protocol fee share percentage
-     * @param newSharePercentage New share percentage in basis points (max 10000 = 100%)
-     */
-    function setProtocolFeeShare(uint256 newSharePercentage) external onlyOwner {
-        if (newSharePercentage > 10000) revert InvalidFeePercentage(); // Max 100%
+    function setMaxFeePercentage(uint256 newMaxFeePercentage) external onlyOwner {
+        if (newMaxFeePercentage > 1000) revert InvalidFeePercentage(); // Max 10%
         
-        uint256 oldShare = protocolFeeSharePercentage;
-        protocolFeeSharePercentage = newSharePercentage;
+        uint256 oldMaxFee = maxFeePercentage;
+        maxFeePercentage = newMaxFeePercentage;
         
-        emit ProtocolFeeShareUpdated(oldShare, newSharePercentage);
-    }
-    
-    /**
-     * @dev Updates the maximum creator fee percentage
-     * @param newMaxFeePercentage New max fee percentage in basis points (max 2000 = 20%)
-     */
-    function setMaxCreatorFeePercentage(uint256 newMaxFeePercentage) external onlyOwner {
-        if (newMaxFeePercentage > 2000) revert InvalidFeePercentage(); // Max 20%
-        
-        uint256 oldMaxFee = maxCreatorFeePercentage;
-        maxCreatorFeePercentage = newMaxFeePercentage;
-        
-        emit MaxCreatorFeeUpdated(oldMaxFee, newMaxFeePercentage);
-    }
-    
-    /**
-     * @dev Updates the protocol fee recipient
-     * @param newRecipient New fee recipient address
-     */
-    function setProtocolFeeRecipient(address newRecipient) external onlyOwner {
-        require(newRecipient != address(0), "Invalid recipient");
-        
-        address oldRecipient = protocolFeeRecipient;
-        protocolFeeRecipient = newRecipient;
-        
-        emit ProtocolFeeRecipientUpdated(oldRecipient, newRecipient);
+        emit MaxFeeUpdated(oldMaxFee, newMaxFeePercentage);
     }
     
     /**
@@ -279,7 +237,7 @@ contract EventFactory is Ownable, ReentrancyGuard {
      * @return eventId Parent event ID
      * @return endTime Market end time
      * @return resolver Resolver contract address
-     * @return pricingCurve Pricing curve contract address
+     * @return fee Fee percentage in basis points
      */
     function getMarket(uint256 marketId) external view returns (
         address marketContract,
@@ -287,7 +245,7 @@ contract EventFactory is Ownable, ReentrancyGuard {
         uint256 eventId,
         uint256 endTime,
         address resolver,
-        address pricingCurve
+        uint256 fee
     ) {
         MarketInfo storage market = markets[marketId];
         if (!market.exists) revert MarketNotFound();
@@ -298,7 +256,7 @@ contract EventFactory is Ownable, ReentrancyGuard {
             market.eventId,
             market.endTime,
             market.resolver,
-            market.pricingCurve
+            market.fee
         );
     }
     
