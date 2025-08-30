@@ -45,6 +45,9 @@ contract Market is ReentrancyGuard {
     uint256 public yesSupply;
     uint256 public noSupply;
     
+    // Initial virtual liquidity to maintain constant product formula
+    uint256 private constant INITIAL_LIQUIDITY = 1000 * 1e18;
+    
     // Events
     event TokensPurchased(address indexed buyer, bool isYes, uint256 amount, uint256 cost);
     event TokensSold(address indexed seller, bool isYes, uint256 amount, uint256 payout);
@@ -99,6 +102,10 @@ contract Market is ReentrancyGuard {
         pricingCurve = _pricingCurve;
     // state is now computed, no assignment needed
         
+        // Initialize with virtual liquidity to maintain constant product formula
+        yesSupply = INITIAL_LIQUIDITY;
+        noSupply = INITIAL_LIQUIDITY;
+        
         // Create market tokens
         yesToken = new MarketToken(string(abi.encodePacked("YES-", _question)), "YES");
         noToken = new MarketToken(string(abi.encodePacked("NO-", _question)), "NO");
@@ -106,7 +113,7 @@ contract Market is ReentrancyGuard {
     
     /**
      * @dev Buy prediction tokens
-     * @param amount Amount of tokens to buy
+     * @param amount Amount of base tokens (ETH/USDT) to spend
      * @param buyYes Whether to buy YES tokens (true) or NO tokens (false)
      */
     function buyTokens(uint256 amount, bool buyYes) external payable nonReentrant {
@@ -118,23 +125,27 @@ contract Market is ReentrancyGuard {
             }
         }
         
-        uint256 cost = pricingCurve.calculateBuyPrice(yesSupply, noSupply, amount, buyYes);
+        // Ensure sufficient payment
+        if (msg.value < amount) revert InsufficientPayment();
         
-        // Calculate fees
-        uint256 totalCreatorFee = (cost * creatorFeePercentage) / 10000;
+        // Calculate fees first to determine net input amount
+        uint256 totalCreatorFee = (amount * creatorFeePercentage) / 10000;
         uint256 protocolFee = (totalCreatorFee * protocolFeeSharePercentage) / 10000;
         uint256 creatorFee = totalCreatorFee - protocolFee;
         
-        uint256 totalCost = cost + totalCreatorFee;
-        if (msg.value < totalCost) revert InsufficientPayment();
+        // Amount after fees deduction - this is used for token calculation
+        uint256 netAmount = amount - totalCreatorFee;
+        
+        // Calculate tokens received using net amount (amount after fees)
+        uint256 tokensReceived = pricingCurve.calculateExactInput(yesSupply, noSupply, netAmount, buyYes);
         
         // Update supplies
         if (buyYes) {
-            yesSupply += amount;
-            MarketToken(address(yesToken)).mint(msg.sender, amount);
+            yesSupply += tokensReceived;
+            MarketToken(address(yesToken)).mint(msg.sender, tokensReceived);
         } else {
-            noSupply += amount;
-            MarketToken(address(noToken)).mint(msg.sender, amount);
+            noSupply += tokensReceived;
+            MarketToken(address(noToken)).mint(msg.sender, tokensReceived);
         }
         
         // Distribute fees
@@ -147,12 +158,12 @@ contract Market is ReentrancyGuard {
         }
         
         // Refund excess
-        if (msg.value > totalCost) {
-            (bool success,) = msg.sender.call{value: msg.value - totalCost}("");
+        if (msg.value > amount) {
+            (bool success,) = msg.sender.call{value: msg.value - amount}("");
             require(success, "Refund failed");
         }
         
-        emit TokensPurchased(msg.sender, buyYes, amount, totalCost);
+        emit TokensPurchased(msg.sender, buyYes, tokensReceived, amount);
     }
     
     /**
@@ -236,13 +247,29 @@ contract Market is ReentrancyGuard {
         uint256 amount = winningToken.balanceOf(msg.sender);
         if (amount == 0) revert InsufficientTokens();
         
-        // Burn tokens and transfer collateral assets (1:1 ratio)
+        // Calculate redemption value accounting for virtual liquidity
+        uint256 winningSupply = outcome ? yesSupply : noSupply;
+        uint256 actualTokensInCirculation = winningSupply - INITIAL_LIQUIDITY;
+        
+        // Proportional redemption based on actual tokens vs virtual tokens
+        uint256 redemptionValue;
+        if (actualTokensInCirculation > 0) {
+            // Proportional share of available ETH (excluding virtual liquidity backing)
+            redemptionValue = (amount * actualTokensInCirculation) / winningSupply;
+        } else {
+            // Edge case: no real tokens in circulation, no redemption value
+            redemptionValue = 0;
+        }
+        
+        // Burn tokens
         MarketToken(address(winningToken)).burn(msg.sender, amount);
         
-        (bool success,) = msg.sender.call{value: amount}("");
-        require(success, "Redemption failed");
+        if (redemptionValue > 0) {
+            (bool success,) = msg.sender.call{value: redemptionValue}("");
+            require(success, "Redemption failed");
+        }
         
-        emit TokensRedeemed(msg.sender, amount);
+        emit TokensRedeemed(msg.sender, redemptionValue);
     }
     
     /**
