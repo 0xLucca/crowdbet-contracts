@@ -13,16 +13,18 @@ contract BinaryPredictionMarketTest is Test {
     address public trader1 = address(0x3);
     address public trader2 = address(0x4);
     address public resolver = address(0x5);
+    address public protocolFeeRecipient = address(0x6);
     
     function setUp() public {
         // Deploy contracts
-        eventFactory = new EventFactory();
+        eventFactory = new EventFactory(protocolFeeRecipient);
         
         // Fund test accounts with ETH for trading and seed collateral
         vm.deal(trader1, 100 ether);
         vm.deal(trader2, 100 ether);
         vm.deal(eventCreator, 100 ether);
         vm.deal(resolver, 100 ether);
+        vm.deal(protocolFeeRecipient, 1 ether);
     }
     
     function testCreateEvent() public {
@@ -708,6 +710,244 @@ contract BinaryPredictionMarketTest is Test {
         
         assertLt(secondBuyerPricePerToken, firstBuyerPricePerToken, 
             "NO tokens should be cheaper per unit when YES probability is high");
+    }
+    
+    // ========================================
+    // FEE DISTRIBUTION TESTS
+    // ========================================
+    
+    function testFeeDistributionBetweenProtocolAndResolver() public {
+        // Create market with fees
+        vm.startPrank(eventCreator);
+        
+        EventFactory.MarketConfig[] memory configs = new EventFactory.MarketConfig[](1);
+        configs[0] = EventFactory.MarketConfig({
+            question: "Fee distribution test market",
+            duration: 30 days,
+            fee: 1000, // 10% fee in basis points
+            seedCollateral: 1 ether
+        });
+        
+        (uint256 eventId, uint256[] memory marketIds) = eventFactory.createManualEvent{value: 1 ether}(
+            "Fee Distribution Test",
+            "Testing fee distribution mechanics",
+            configs
+        );
+        
+        vm.stopPrank();
+        
+        // Get market contract and resolver
+        (address marketContract,,,, address marketResolver,) = eventFactory.getMarket(marketIds[0]);
+        BinaryPredictionMarket market = BinaryPredictionMarket(payable(marketContract));
+        
+        // Verify resolver is the event creator
+        assertEq(marketResolver, eventCreator);
+        
+        // Record initial balances
+        uint256 protocolBalanceBefore = protocolFeeRecipient.balance;
+        uint256 resolverBalanceBefore = eventCreator.balance;
+        uint256 marketBalanceBefore = address(market).balance;
+        
+        console.log("=== INITIAL STATE ===");
+        console.log("Protocol balance before:", protocolBalanceBefore);
+        console.log("Resolver balance before:", resolverBalanceBefore);
+        console.log("Market balance before:", marketBalanceBefore);
+        
+        // Generate fees through trading
+        uint256 totalTradeAmount = 10 ether;
+        uint256 expectedFees = (totalTradeAmount * 1000) / 10000; // 10% fees
+        
+        // Trader 1 buys YES tokens
+        vm.startPrank(trader1);
+        market.buyYes{value: 5 ether}();
+        vm.stopPrank();
+        
+        // Trader 2 buys NO tokens
+        vm.startPrank(trader2);
+        market.buyNo{value: 5 ether}();
+        vm.stopPrank();
+        
+        uint256 marketBalanceAfterTrades = address(market).balance;
+        
+        // Get vault amount to calculate fees correctly
+        (, , , , , , uint256 vaultAmount, ,) = market.getMarketInfo();
+        uint256 actualFeesGenerated = marketBalanceAfterTrades - vaultAmount;
+        
+        console.log("=== AFTER TRADING ===");
+        console.log("Market balance after trades:", marketBalanceAfterTrades);
+        console.log("Vault amount:", vaultAmount);
+        console.log("Expected fees:", expectedFees);
+        console.log("Actual fees generated:", actualFeesGenerated);
+        
+        // Verify fees were generated
+        assertApproxEqRel(actualFeesGenerated, expectedFees, 0.01e18); // Within 1% tolerance
+        
+        // Withdraw fees (only resolver can do this)
+        vm.startPrank(eventCreator);
+        market.withdrawFees();
+        vm.stopPrank();
+        
+        // Record final balances
+        uint256 protocolBalanceAfter = protocolFeeRecipient.balance;
+        uint256 resolverBalanceAfter = eventCreator.balance;
+        uint256 marketBalanceAfter = address(market).balance;
+        
+        console.log("=== AFTER FEE WITHDRAWAL ===");
+        console.log("Protocol balance after:", protocolBalanceAfter);
+        console.log("Resolver balance after:", resolverBalanceAfter);
+        console.log("Market balance after:", marketBalanceAfter);
+        
+        // Calculate fee distributions
+        uint256 protocolFeeReceived = protocolBalanceAfter - protocolBalanceBefore;
+        uint256 resolverFeeReceived = resolverBalanceAfter - resolverBalanceBefore;
+        
+        console.log("Protocol fee received:", protocolFeeReceived);
+        console.log("Resolver fee received:", resolverFeeReceived);
+        
+        // Verify 50/50 split
+        uint256 expectedHalfFees = actualFeesGenerated / 2;
+        assertApproxEqAbs(protocolFeeReceived, expectedHalfFees, 1 wei); // Allow 1 wei rounding difference
+        assertApproxEqAbs(resolverFeeReceived, expectedHalfFees, 1 wei);
+        
+        // Verify total distribution
+        assertApproxEqAbs(protocolFeeReceived + resolverFeeReceived, actualFeesGenerated, 1 wei);
+        
+        // Verify market balance is reduced by fees
+        assertApproxEqAbs(marketBalanceAfter, marketBalanceAfterTrades - actualFeesGenerated, 1 wei);
+    }
+    
+    function testFeeWithdrawalAccessControl() public {
+        // Create market
+        vm.startPrank(eventCreator);
+        
+        EventFactory.MarketConfig[] memory configs = new EventFactory.MarketConfig[](1);
+        configs[0] = EventFactory.MarketConfig({
+            question: "Access control test market",
+            duration: 30 days,
+            fee: 500, // 5% fee
+            seedCollateral: 1 ether
+        });
+        
+        (uint256 eventId, uint256[] memory marketIds) = eventFactory.createManualEvent{value: 1 ether}(
+            "Access Control Test",
+            "Testing access control for fee withdrawal",
+            configs
+        );
+        
+        vm.stopPrank();
+        
+        // Get market contract
+        (address marketContract,,,,,) = eventFactory.getMarket(marketIds[0]);
+        BinaryPredictionMarket market = BinaryPredictionMarket(payable(marketContract));
+        
+        // Generate some fees
+        vm.startPrank(trader1);
+        market.buyYes{value: 2 ether}();
+        vm.stopPrank();
+        
+        // Test that non-resolver cannot withdraw fees
+        vm.startPrank(trader1);
+        vm.expectRevert("Not resolver");
+        market.withdrawFees();
+        vm.stopPrank();
+        
+        vm.startPrank(trader2);
+        vm.expectRevert("Not resolver");
+        market.withdrawFees();
+        vm.stopPrank();
+        
+        vm.startPrank(protocolFeeRecipient);
+        vm.expectRevert("Not resolver");
+        market.withdrawFees();
+        vm.stopPrank();
+        
+        // Verify resolver can withdraw fees
+        vm.startPrank(eventCreator);
+        market.withdrawFees(); // Should not revert
+        vm.stopPrank();
+    }
+    
+    function testNoFeesAvailableForWithdrawal() public {
+        // Create market with minimal seed collateral
+        vm.startPrank(eventCreator);
+        
+        EventFactory.MarketConfig[] memory configs = new EventFactory.MarketConfig[](1);
+        configs[0] = EventFactory.MarketConfig({
+            question: "No fees test market",
+            duration: 30 days,
+            fee: 500, // 5% fee
+            seedCollateral: 0.1 ether
+        });
+        
+        (uint256 eventId, uint256[] memory marketIds) = eventFactory.createManualEvent{value: 0.1 ether}(
+            "No Fees Test",
+            "Testing withdrawal when no fees available",
+            configs
+        );
+        
+        // Get market contract
+        (address marketContract,,,,,) = eventFactory.getMarket(marketIds[0]);
+        BinaryPredictionMarket market = BinaryPredictionMarket(payable(marketContract));
+        
+        // Attempt to withdraw fees when none are available
+        vm.expectRevert("No fees to withdraw");
+        market.withdrawFees();
+        
+        vm.stopPrank();
+    }
+    
+    function testLargeFeeDistribution() public {
+        // Test with larger amounts to ensure proper handling of big numbers
+        vm.startPrank(eventCreator);
+        
+        EventFactory.MarketConfig[] memory configs = new EventFactory.MarketConfig[](1);
+        configs[0] = EventFactory.MarketConfig({
+            question: "Large fee test market",
+            duration: 30 days,
+            fee: 750, // 7.5% fee
+            seedCollateral: 5 ether
+        });
+        
+        (uint256 eventId, uint256[] memory marketIds) = eventFactory.createManualEvent{value: 5 ether}(
+            "Large Fee Test",
+            "Testing fee distribution with large amounts",
+            configs
+        );
+        
+        vm.stopPrank();
+        
+        (address marketContract,,,,,) = eventFactory.getMarket(marketIds[0]);
+        BinaryPredictionMarket market = BinaryPredictionMarket(payable(marketContract));
+        
+        // Record initial balances
+        uint256 protocolBalanceBefore = protocolFeeRecipient.balance;
+        uint256 resolverBalanceBefore = eventCreator.balance;
+        
+        // Large trades
+        vm.startPrank(trader1);
+        market.buyYes{value: 50 ether}();
+        vm.stopPrank();
+        
+        vm.startPrank(trader2);
+        market.buyNo{value: 30 ether}();
+        vm.stopPrank();
+        
+        // Withdraw fees
+        vm.startPrank(eventCreator);
+        market.withdrawFees();
+        vm.stopPrank();
+        
+        // Verify proper distribution with large amounts
+        uint256 protocolFeeReceived = protocolFeeRecipient.balance - protocolBalanceBefore;
+        uint256 resolverFeeReceived = eventCreator.balance - resolverBalanceBefore;
+        
+        console.log("Large test - Protocol fee:", protocolFeeReceived);
+        console.log("Large test - Resolver fee:", resolverFeeReceived);
+        
+        // Should be approximately equal (within 1 wei due to integer division)
+        assertApproxEqAbs(protocolFeeReceived, resolverFeeReceived, 1 wei);
+        assertGt(protocolFeeReceived, 0);
+        assertGt(resolverFeeReceived, 0);
     }
     
     // Helper function

@@ -50,7 +50,9 @@ contract EventFactory is Ownable, ReentrancyGuard {
     
     // Protocol configuration
     uint256 public maxFeePercentage = 1000; // Max 10% fee allowed (in basis points)
-    
+
+    address public protocolFeePaymentAddress;
+
     // Events
     event EventCreated(
         uint256 indexed eventId,
@@ -82,7 +84,8 @@ contract EventFactory is Ownable, ReentrancyGuard {
     /**
      * @dev Constructor
      */
-    constructor() Ownable(msg.sender) {
+    constructor(address _protocolFeePaymentAddress) Ownable(msg.sender) {
+        protocolFeePaymentAddress = _protocolFeePaymentAddress;
     }
     
     /**
@@ -116,13 +119,16 @@ contract EventFactory is Ownable, ReentrancyGuard {
         bool isManual
     ) internal returns (uint256 eventId, uint256[] memory marketIds) {
         // Calculate total seed collateral needed
-        uint256 totalSeedCollateral = 0;
+        {
+             uint256 totalSeedCollateral = 0;
         for (uint256 i = 0; i < marketConfigs.length; i++) {
             totalSeedCollateral += marketConfigs[i].seedCollateral;
         }
         
         // Ensure sufficient ETH provided
         require(msg.value >= totalSeedCollateral, "Insufficient ETH for seed collateral");
+        }
+       
         
         eventId = nextEventId++;
         marketIds = new uint256[](marketConfigs.length);
@@ -144,11 +150,6 @@ contract EventFactory is Ownable, ReentrancyGuard {
 
         // Update the event with the actual market IDs
         events[eventId].marketIds = marketIds;
-        
-        // Refund excess ETH
-        if (msg.value > totalSeedCollateral) {
-            payable(msg.sender).transfer(msg.value - totalSeedCollateral);
-        }
         
         emit EventCreated(eventId, title, msg.sender, marketIds);
     }
@@ -175,7 +176,8 @@ contract EventFactory is Ownable, ReentrancyGuard {
             resolver,
             config.fee,
             config.duration,
-            config.seedCollateral
+            config.seedCollateral,
+            protocolFeePaymentAddress
         );
         
         uint256 endTime = block.timestamp + config.duration;
@@ -205,6 +207,10 @@ contract EventFactory is Ownable, ReentrancyGuard {
         maxFeePercentage = newMaxFeePercentage;
         
         emit MaxFeeUpdated(oldMaxFee, newMaxFeePercentage);
+    }
+
+    function setProtocolFeePaymentAddress(address newPaymentAddress) external onlyOwner {
+        protocolFeePaymentAddress = newPaymentAddress;
     }
     
     /**

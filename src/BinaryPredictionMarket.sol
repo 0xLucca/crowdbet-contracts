@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 contract BinaryPredictionMarket {
+    //TODO: BLOCK TRADING WHEN MARKET IS RESOLVED
     // --- Config / Global State ---
     address public immutable resolver;   // address that can resolve the market
     uint256 public immutable fee;        // fee in basis points (100 = 1%)
@@ -21,7 +22,9 @@ contract BinaryPredictionMarket {
     // User balances (internal ledger, not ERC20)
     mapping(address => uint256) public yesBalance;
     mapping(address => uint256) public noBalance;
-    
+
+    address immutable public protocolFeeRecipient;
+
     // --- Events ---
     event MarketCreated(string question, address resolver, uint256 fee, uint256 endTime);
     event Seeded(uint256 seed, uint256 x, uint256 y, uint256 vault);
@@ -52,7 +55,8 @@ contract BinaryPredictionMarket {
         address _resolver, 
         uint256 _fee,
         uint256 _duration,
-        uint256 _seedCollateral
+        uint256 _seedCollateral,
+        address _protocolFeeRecipient
     ) payable {
         require(_fee <= 1000, "Fee too high"); // Max 10%
         require(_resolver != address(0), "Invalid resolver");
@@ -63,7 +67,8 @@ contract BinaryPredictionMarket {
         resolver = _resolver;
         fee = _fee;
         endTime = block.timestamp + _duration;
-        
+        protocolFeeRecipient = _protocolFeeRecipient;
+
         // Initial seeding
         if (_seedCollateral > 0) {
             _seed(_seedCollateral);
@@ -319,7 +324,19 @@ contract BinaryPredictionMarket {
         uint256 balance = address(this).balance;
         uint256 feesAvailable = balance - vault;
         require(feesAvailable > 0, "No fees to withdraw");
+
+        // Transfer half to the protocol fee recipient
+        uint256 half = feesAvailable / 2;
+        {
+            (bool success, ) = payable(protocolFeeRecipient).call{value: half}("");
+            require(success, "Transfer failed");
+        }
         
-        payable(resolver).transfer(feesAvailable);
+
+        // Transfer the other half to the resolver
+        {
+            (bool success, ) = payable(resolver).call{value: half}("");
+            require(success, "Transfer failed");
+        }
     }
 }
