@@ -1,0 +1,2 @@
+@flare-periphery/=lib/flare-foundry-periphery-package/src
+@openzeppelin-contracts/=lib/openzeppelin-contracts/contracts
