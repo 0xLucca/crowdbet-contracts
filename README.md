@@ -1,6 +1,6 @@
-# CrowdBet - Decentralized Prediction Markets
+# Crowdnet - Decentralized Prediction Markets
 
-CrowdBet is a permissionless prediction market platform built with Solidity that enables anyone to create and trade on binary prediction markets. The platform uses a **Constant Product Market Maker (CPMM)** model with a **Complete Sets architecture** to ensure efficient price discovery and liquidity.
+Crowdnet is a permissionless prediction market platform built with Solidity that enables anyone to create and trade on binary prediction markets. The platform uses a **Constant Product Market Maker (CPMM)** model with a **Complete Sets architecture** to ensure efficient price discovery and liquidity.
 
 ## 🏗️ Architecture Overview
 
@@ -80,8 +80,8 @@ When buying YES tokens with ETH:
 
 ### Installation
 ```bash
-git clone https://github.com/your-repo/crowdbet-contracts
-cd crowdbet-contracts
+git clone https://github.com/0xLucca/crowdnet-contracts
+cd crowdnet-contracts
 forge install
 ```
 
