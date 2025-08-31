@@ -2,7 +2,6 @@
 pragma solidity ^0.8.24;
 
 contract BinaryPredictionMarket {
-    //TODO: BLOCK TRADING WHEN MARKET IS RESOLVED
     // --- Config / Global State ---
     address public immutable resolver;   // address that can resolve the market
     uint256 public immutable fee;        // fee in basis points (100 = 1%)
