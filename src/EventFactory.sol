@@ -2,8 +2,6 @@
 pragma solidity ^0.8.19;
 
 import "./BinaryPredictionMarket.sol";
-// import "./resolvers/ManualResolver.sol";
-// import "./resolvers/TimeBasedResolver.sol";
 import "lib/openzeppelin-contracts/contracts/access/Ownable.sol";
 import "lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
 
@@ -15,7 +13,7 @@ contract EventFactory is Ownable, ReentrancyGuard {
     // Market configuration structure
     struct MarketConfig {
         string question;
-        uint256 duration; // Duration in seconds instead of endTime
+        uint256 duration;
         uint256 fee; // Fee percentage in basis points (100 = 1%)
         uint256 seedCollateral; // Initial seed collateral amount
     }

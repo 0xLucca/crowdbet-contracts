@@ -6,4 +6,11 @@ optimizer = true
 optimizer_runs = 200
 via_ir = true
 
-# See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+# Network configurations
+[rpc_endpoints]
+coston2 = "https://coston2-api.flare.network/ext/C/rpc"
+sepolia = "https://sepolia.drpc.org"
+lisk = "https://rpc.sepolia-api.lisk.com"
+local = "http://127.0.0.1:8545"
+
+evm_version = "shangai"
